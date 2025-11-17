@@ -15,6 +15,7 @@ import plotly.express as px
 # CONFIG
 # -----------------------
 CONDOMINIO_NOME = "Voraus I"
+
 DATA_CSV = "regras_classificadas.csv"  # output do seu pipeline NLP
 st.set_page_config(
     page_title=f"Portal de Convivência {CONDOMINIO_NOME}",
@@ -148,12 +149,13 @@ if "entered" not in st.session_state:
 if not st.session_state.entered:
     cols = st.columns([1, 2])
     with cols[0]:
-        st.image("https://images.pexels.com/photos/4247766/pexels-photo-4247766.jpeg", width=160)
+        hero_image = "202411061238098923.jpg"
+        st.image(hero_image, use_column_width=True)
     with cols[1]:
         st.markdown(f"<div class='welcome-card'><h1>🤝 Portal de Convivência — {CONDOMINIO_NOME}</h1><p>Informação correta e acessível para decisões rápidas e justas. Use o portal para localizar regras, verificar penalidades e baixar relatórios.</p></div>", unsafe_allow_html=True)
     if st.button("Entrar e Explorar o Portal"):
         st.session_state.entered = True
-        st.experimental_rerun()
+        st.rerun()
     st.stop()
 
 # -----------------------
