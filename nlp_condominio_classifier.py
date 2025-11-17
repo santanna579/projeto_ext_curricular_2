@@ -1,83 +1,83 @@
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import KMeans
 import os
 import warnings
+import re
+import nltk
+import unicodedata
+from nltk.corpus import stopwords
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
 
-# Ignora warnings do scikit-learn
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# --- CONFIGURAÇÕES ---
-INPUT_CSV = 'regras_condominio.csv'
-OUTPUT_CSV = 'regras_classificadas.csv'
-# Definimos 6 clusters (categorias) como um bom ponto de partida para regimentos internos.
-NUM_CLUSTERS = 6 
+INPUT_CSV = "regras_condominio.csv"
+OUTPUT_CSV = "regras_classificadas.csv"
+NUM_CLUSTERS = 8
+
+# Garantir stopwords
+try:
+    stopwords.words("portuguese")
+except:
+    nltk.download("stopwords")
+
+# AQUI ESTÁ A CORREÇÃO
+stop_pt = stopwords.words("portuguese")   # <<<<<<<<< CORRIGIDO
 
 
-def run_condominio_nlp():
-    """Executa a vetorização e o clustering (K-Means) nas regras do condomínio."""
-    
+def normalizar(texto):
+    texto = texto.lower()
+    texto = unicodedata.normalize("NFD", texto)
+    texto = texto.encode("ascii", "ignore").decode("utf-8")
+    texto = re.sub(r"[^a-zA-Z0-9\s]", " ", texto)
+    return texto
+
+
+def run_nlp():
     if not os.path.exists(INPUT_CSV):
-        print(f"❌ ERRO: Arquivo de entrada '{INPUT_CSV}' não encontrado. Execute o pdf_parser.py primeiro.")
+        print(f"ERRO: CSV '{INPUT_CSV}' não encontrado.")
         return pd.DataFrame()
-
-    print("\n===============================================")
-    print("= FASE NLP: CLASSIFICAÇÃO DE REGRAS (K-MEANS) =")
-    print("===============================================")
 
     df = pd.read_csv(INPUT_CSV)
-    
-    if df['Texto_Limpo'].isnull().all() or df.empty:
-        print("❌ ERRO: A coluna 'Texto_Limpo' está vazia. O parser de PDF falhou ao extrair o conteúdo.")
+
+    if "Texto_Limpo" not in df.columns:
+        print("ERRO: coluna Texto_Limpo ausente.")
         return pd.DataFrame()
 
-    # 1. Vetorização (TF-IDF)
-    # Transforma o texto limpo em vetores numéricos para o algoritmo.
-    print(f"Processando {len(df)} regras e vetorizando texto...")
-    
-    vectorizer = TfidfVectorizer(max_features=150, stop_words='english') # Mantemos um vocabulário limitado
-    X = vectorizer.fit_transform(df['Texto_Limpo'])
+    print(f"🔍 Vetorizando {len(df)} regras...")
 
-    # 2. Modelagem (K-Means Clustering)
-    print(f"Aplicando K-Means com {NUM_CLUSTERS} clusters...")
-    
-    kmeans = KMeans(n_clusters=NUM_CLUSTERS, init='k-means++', random_state=42, n_init=10)
-    # Treina o modelo e atribui um cluster (ID de categoria) a cada regra
-    df['Cluster_ID'] = kmeans.fit_predict(X)
+    textos = df["Texto_Limpo"].fillna("").apply(normalizar)
 
-    # 3. Análise dos Clusters (Palavras-Chave)
-    print("\n--- PASSO CRÍTICO: ANÁLISE PARA NOMEAÇÃO DAS CATEGORIAS ---")
-    order_centroids = kmeans.cluster_centers_.argsort()[:, ::-1]
-    terms = vectorizer.get_feature_names_out()
-    
+    vectorizer = TfidfVectorizer(
+        max_features=400,
+        stop_words=stop_pt,      # Lista válida
+        ngram_range=(1, 2)
+    )
+
+    X = vectorizer.fit_transform(textos)
+
+    print("🧠 Treinando KMeans...")
+    kmeans = KMeans(n_clusters=NUM_CLUSTERS, random_state=42, n_init=20)
+    df["Cluster_ID"] = kmeans.fit_predict(X)
+
+    termos = vectorizer.get_feature_names_out()
+    centers = kmeans.cluster_centers_.argsort()[:, ::-1]
+
     cluster_names = {}
-    for i in range(NUM_CLUSTERS):
-        # Seleciona as 5 palavras mais importantes de cada cluster
-        top_words = [terms[ind] for ind in order_centroids[i, :5]]
-        
-        # O resultado inicial é a lista de palavras-chave. Jéssica fará a interpretação final.
-        cluster_names[i] = f"A Classificar: {', '.join(top_words)}"
-        print(f"Cluster {i}: Palavras-chave: {top_words}")
-    
-    print("----------------------------------------------------------")
-    print("🎯 Interpretação: Baseado nas palavras-chave acima, atribua um nome profissional.")
-    print("Exemplo: Se o Cluster 0 tiver 'silêncio', 'ruído', 'festa', o nome será 'Regras de Silêncio'.")
-    print("----------------------------------------------------------")
+    for c in range(NUM_CLUSTERS):
+        top_words = [termos[i] for i in centers[c][:5]]
+        nome = " | ".join(top_words).title()
+        cluster_names[c] = nome
+        print(f"Cluster {c}: {top_words} → {nome}")
 
-    # Mapeamento e Salvamento (Temporário com rótulos brutos)
-    df['Categoria_Final'] = df['Cluster_ID'].map(cluster_names)
-    
-    df_output = df[['Artigo', 'Texto_Regra', 'Tem_Multa', 'Categoria_Final', 'Cluster_ID', 'Texto_Limpo']]
-    df_output.to_csv(OUTPUT_CSV, index=False, encoding='utf-8')
-    
-    print(f"\n✅ Sucesso! O arquivo '{OUTPUT_CSV}' foi gerado.")
-    print(f"Total de {len(df)} regras classificadas em {NUM_CLUSTERS} categorias.")
+    df["Categoria_NLP"] = df["Cluster_ID"].map(cluster_names)
 
-    return df_output
+    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8")
+
+    print("\n✅ NLP concluído!")
+    print(f"Arquivo gerado: {OUTPUT_CSV}")
+
+    return df
+
 
 if __name__ == "__main__":
-    df_classified = run_condominio_nlp()
-    
-    if not df_classified.empty:
-        print("\n--- Amostra das Regras Classificadas ---")
-        print(df_classified[['Artigo', 'Categoria_Final', 'Tem_Multa']].head(10))
+    run_nlp()

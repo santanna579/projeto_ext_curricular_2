@@ -1,132 +1,131 @@
-import pandas as pd
 import re
-import os
 import pypdf
+import pandas as pd
 import nltk
 from nltk.corpus import stopwords
 import string
-import warnings
 
-# Ignorar warnings sobre recursos experimentais do pypdf, se houver
-warnings.filterwarnings("ignore")
+# Garantir stopwords (execute uma vez se necessário)
+try:
+    stopwords.words('portuguese')
+except:
+    nltk.download('stopwords')
 
-# Nome do arquivo de entrada e saída
-PDF_FILENAME = '024 - REGULAMENTO INTERNO - reformulado.pdf'
-OUTPUT_CSV_FILENAME = 'regras_condominio.csv'
+PDF_FILENAME = "024 - REGULAMENTO INTERNO - reformulado.pdf"
+OUTPUT_CSV = "regras_condominio.csv"
 
-# --- 1. CONFIGURAÇÃO DE PALAVRAS-CHAVE ---
-# Palavras-chave em português para detectar se a regra possui penalidade
 PENALTY_KEYWORDS = [
-    "multa", 
-    "advertência", 
-    "penalidade", 
-    "sanção", 
-    "suspensão",
-    "sujeita a",
-    "incide em",
-    "será punido"
+    "multa", "advertência", "penalidade", "sanção", "suspensão",
+    "sujeita a", "incide em", "será punido", "carta de advertência"
 ]
 
-# --- 2. FUNÇÕES DE EXTRAÇÃO ---
+def extract_text(pdf_path):
+    reader = pypdf.PdfReader(pdf_path)
+    text = ""
+    for p in reader.pages:
+        page_text = p.extract_text() or ""
+        text += page_text + "\n"
+    return text
 
-def extract_text_from_pdf(pdf_path):
-    """Extrai texto bruto de todas as páginas do PDF."""
-    try:
-        reader = pypdf.PdfReader(pdf_path)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        return text
-    except FileNotFoundError:
-        print(f"❌ ERRO: Arquivo '{pdf_path}' não encontrado. Salve o PDF no mesmo diretório do script.")
-        return None
-    except Exception as e:
-        print(f"❌ Ocorreu um erro ao ler o PDF: {e}")
-        return None
-
-def parse_regulations(raw_text):
+def split_articles(full_text):
     """
-    Usa Regex para identificar e separar Artigos e Cláusulas, e classifica penalidades.
-    Este regex é customizado para o formato "Art. Xº" ou "X.Y"
+    Retorna lista de (article_label, article_block_text, start_idx, end_idx)
+    Detecta marcadores 'Art. 1º', 'Art. 1', 'Art 1º' (case-insensitive).
     """
-    
-    # Padroniza quebras de linha e múltiplos espaços para facilitar o Regex
-    text = raw_text.replace('\n', ' ').replace('\r', ' ')
-    text = re.sub(r'\s{2,}', ' ', text).strip()
+    # normalize spaces and newlines to single spaces to make indexing reliable
+    norm = full_text.replace('\r', ' ').replace('\n', ' ')
+    # find all article markers
+    art_pat = re.compile(r'(Art\.?\s*\d+º?)', re.IGNORECASE)
+    matches = list(art_pat.finditer(norm))
+    articles = []
+    for i, m in enumerate(matches):
+        label = m.group(1).strip()
+        start = m.end()
+        end = matches[i+1].start() if i+1 < len(matches) else len(norm)
+        block = norm[start:end].strip()
+        articles.append((label, block))
+    return articles
 
-    # Padrão de identificação de regras:
-    # Captura Art. Xº (ou Art. X), ou X.Y (para subitens)
-    # A flag re.I ignora case (Art. e art.)
-    # O padrão busca por um marcador seguido por um espaço/hífen e o texto da regra
-    # Adiciona-se uma quebra de linha artificial para garantir que o regex separe corretamente
-    rule_markers = re.compile(r'(\s*Art\. \d+º\s*-?\s*|\s*Art\. \d+\s*-?\s*|\s*\d+\.\d+\s*-?\s*)', re.I)
-    
-    # Usamos o marcador para quebrar o texto
-    parts = rule_markers.split(text)
-    
-    regulations = []
-    
-    # Recombina as partes, buscando por marcadores válidos
-    for i in range(1, len(parts), 2):
-        marker = parts[i].strip()
-        content = parts[i+1].strip()
-        
-        # Ignora marcadores que não parecem ser o Artigo/Item (como "Página X de Y" ou "CAPÍTULO")
-        if not re.match(r'^(Art\.\s*\d+º?|\d+\.\d+)$', marker, re.I):
-            continue
-            
-        # Remove o hífen se ele estiver no marcador
-        article_id = marker.replace('-', '').strip()
+def split_subitems(article_block):
+    """
+    Dentro do bloco de um artigo, identifica subitens numerados (ex: 3.1, 3.1.2 ...)
+    Retorna (article_main_text, list_of_subitems) onde each subitem = (item_label, item_text)
+    """
+    # normalize: ensure there's spacing around common separators
+    block = article_block.strip()
+    # pattern to find subitem markers like 3.1 or 12.10 or 3.1.2 (one or more dots)
+    # allow optional trailing punctuation (comma, dash, colon) immediately after the number
+    sub_pat = re.compile(r'(\d+(?:\.\d+)+)\s*(?:[–—\-:]|,)?\s*', re.IGNORECASE)
+    matches = list(sub_pat.finditer(block))
+    if not matches:
+        # no subitems found
+        return block, []
 
-        # Classificação de Multa
-        tem_multa = 'NÃO'
-        content_lower = content.lower()
-        if any(keyword in content_lower for keyword in PENALTY_KEYWORDS):
-            tem_multa = 'SIM'
+    subitems = []
+    # text before first subitem is the article's main text
+    first_start = matches[0].start()
+    main_text = block[:first_start].strip()
 
-        regulations.append({
-            'Artigo': article_id,
-            'Texto_Regra': content,
-            'Assunto_Bruto': 'A Classificar (NLP)',
-            'Tem_Multa': tem_multa
-        })
+    for i, m in enumerate(matches):
+        label = m.group(1).strip()
+        content_start = m.end()
+        content_end = matches[i+1].start() if i+1 < len(matches) else len(block)
+        content = block[content_start:content_end].strip()
+        # remove trailing punctuation like a solitary comma at end
+        content = content.rstrip(' ,;:')
+        subitems.append((label, content))
+    return main_text, subitems
 
-    return regulations
+def classify_penalty(text):
+    low = text.lower()
+    return "SIM" if any(k in low for k in PENALTY_KEYWORDS) else "NÃO"
 
-# --- 3. EXECUÇÃO PRINCIPAL E GERAÇÃO DO CSV ---
+def clean_text_for_nlp(text):
+    stop_pt = set(stopwords.words('portuguese'))
+    t = text.lower()
+    t = re.sub(f"[{re.escape(string.punctuation)}]", "", t)
+    t = re.sub(r"\d+", "", t)
+    words = [w for w in t.split() if w and w not in stop_pt]
+    return " ".join(words)
+
+def parse_pdf_to_rows(pdf_path):
+    raw = extract_text(pdf_path)
+    articles = split_articles(raw)
+    rows = []
+    for art_label, block in articles:
+        # attempt to split subitems
+        main_text, subitems = split_subitems(block)
+        parent = art_label
+        # if main_text non-empty -> add as its own rule (Article main)
+        if main_text and len(main_text.strip())>0:
+            row = {
+                "Artigo": art_label,
+                "Item": "",
+                "Texto_Regra": main_text,
+                "Parent_Art": parent,
+                "Tem_Multa": classify_penalty(main_text),
+                "Assunto_Bruto": "A Classificar (NLP)"
+            }
+            rows.append(row)
+        # add each subitem as separate row
+        for item_label, item_text in subitems:
+            if not item_text:
+                continue
+            row = {
+                "Artigo": art_label,
+                "Item": item_label,
+                "Texto_Regra": item_text,
+                "Parent_Art": parent,
+                "Tem_Multa": classify_penalty(item_text),
+                "Assunto_Bruto": "A Classificar (NLP)"
+            }
+            rows.append(row)
+    return rows
 
 if __name__ == "__main__":
-    print(f"⏳ Iniciando a extração do Regimento: {PDF_FILENAME}")
-    
-    raw_text = extract_text_from_pdf(PDF_FILENAME)
-    
-    if raw_text:
-        regulations_list = parse_regulations(raw_text)
-        
-        if not regulations_list:
-            print("⚠️ AVISO: Nenhuma regra foi extraída. O formato do PDF pode ter impedido o Regex.")
-        
-        df_regulations = pd.DataFrame(regulations_list)
-        
-        # --- LIMPEZA DE TEXTO PARA O NLP (REAPROVEITAMENTO DO CÓDIGO ANTERIOR) ---
-        stop_words_pt = set(stopwords.words('portuguese'))
-        
-        def clean_text_for_nlp(text):
-            text = text.lower()
-            text = re.sub(f'[{re.escape(string.punctuation)}]', '', text)
-            text = re.sub(r'\d+', '', text)
-            words = text.split()
-            words = [word for word in words if word not in stop_words_pt]
-            return ' '.join(words)
-
-        if not df_regulations.empty:
-            df_regulations['Texto_Limpo'] = df_regulations['Texto_Regra'].apply(clean_text_for_nlp)
-
-            # Reordena e salva o CSV
-            df_regulations = df_regulations[['Artigo', 'Texto_Regra', 'Texto_Limpo', 'Assunto_Bruto', 'Tem_Multa']]
-            df_regulations.to_csv(OUTPUT_CSV_FILENAME, index=False, encoding='utf-8')
-            
-            print("✅ Sucesso! O arquivo regras_condominio.csv foi gerado.")
-            print(f"Total de {len(df_regulations)} regras extraídas. Recomenda-se uma revisão humana.")
-            print("\nPrimeiras 5 regras extraídas:")
-            print(df_regulations.head())
+    rows = parse_pdf_to_rows(PDF_FILENAME)
+    df = pd.DataFrame(rows, columns=["Artigo","Item","Texto_Regra","Parent_Art","Tem_Multa","Assunto_Bruto"])
+    # add Texto_Limpo for NLP
+    df["Texto_Limpo"] = df["Texto_Regra"].apply(clean_text_for_nlp)
+    df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8")
+    print(f"Gerado {OUTPUT_CSV} com {len(df)} linhas")
